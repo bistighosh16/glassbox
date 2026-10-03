@@ -1,10 +1,16 @@
 import os
+import sys
 import time
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from pathlib import Path
+
+# Fix Python path so Streamlit Cloud finds the 'glassbox' package
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # Set dark theme page configuration
 st.set_page_config(
@@ -123,7 +129,7 @@ if st.session_state.trace and len(st.session_state.trace.steps) > 0:
     
     with col_left:
         st.subheader("Attention Matrix")
-        layer_idx = st.selectbox("Layer", options=list(range(config.num_hidden_layers)), index=15)
+        layer_idx = st.selectbox("Layer", options=list(range(config.num_hidden_layers)), index=min(15, config.num_hidden_layers-1))
         head_idx = st.selectbox("Head", options=list(range(config.num_attention_heads)), index=0)
         
         attn_matrix = current_step.attention[layer_idx][head_idx]
@@ -133,7 +139,7 @@ if st.session_state.trace and len(st.session_state.trace.steps) > 0:
         fig_attn = px.imshow(
             np.sqrt(np.clip(attn_matrix, 0, 1)),
             x=tokens_so_far,
-            y=tokens_so_far[1:],
+            y=tokens_so_far[1:] if len(tokens_so_far) > 1 else tokens_so_far,
             color_continuous_scale="Viridis",
             labels=dict(x="Key Tokens (Past)", y="Query Tokens (Generated)", color="Attention")
         )
@@ -182,7 +188,7 @@ if st.session_state.trace and len(st.session_state.trace.steps) > 0:
     
     # Display 30 layers in 2 rows of 15 columns
     cols_row1 = st.columns(15)
-    for i in range(15):
+    for i in range(min(15, len(lens_data))):
         layer_info = lens_data[i]
         tok_str = (layer_info.get("top_token_str") or tokenizer.decode([layer_info["top_token"]])).replace(" ", "·")
         prob_pct = round(layer_info["prob"] * 100, 1)
@@ -200,23 +206,24 @@ if st.session_state.trace and len(st.session_state.trace.steps) > 0:
             </div>
         """, unsafe_allow_html=True)
 
-    cols_row2 = st.columns(15)
-    for i in range(15, 30):
-        layer_info = lens_data[i]
-        tok_str = (layer_info.get("top_token_str") or tokenizer.decode([layer_info["top_token"]])).replace(" ", "·")
-        prob_pct = round(layer_info["prob"] * 100, 1)
-        
-        is_gold = (i == first_match)
-        border_style = "2px solid #facc15" if is_gold else "1px solid #283046"
-        bg_style = "#232215" if is_gold else "#181d2d"
-        badge = "🎯" if is_gold else ""
-        
-        cols_row2[i-15].markdown(f"""
-            <div style="background:{bg_style}; border:{border_style}; border-radius:4px; padding:4px; text-align:center;">
-                <div style="font-size:10px; color:#94a3b8;">L{i} {badge}</div>
-                <div style="font-size:12px; font-weight:bold; color:#f8fafc;">{tok_str}</div>
-                <div style="font-size:10px; color:#38bdf8;">{prob_pct}%</div>
-            </div>
-        """, unsafe_allow_html=True)
+    if len(lens_data) > 15:
+        cols_row2 = st.columns(15)
+        for i in range(15, min(30, len(lens_data))):
+            layer_info = lens_data[i]
+            tok_str = (layer_info.get("top_token_str") or tokenizer.decode([layer_info["top_token"]])).replace(" ", "·")
+            prob_pct = round(layer_info["prob"] * 100, 1)
+            
+            is_gold = (i == first_match)
+            border_style = "2px solid #facc15" if is_gold else "1px solid #283046"
+            bg_style = "#232215" if is_gold else "#181d2d"
+            badge = "🎯" if is_gold else ""
+            
+            cols_row2[i-15].markdown(f"""
+                <div style="background:{bg_style}; border:{border_style}; border-radius:4px; padding:4px; text-align:center;">
+                    <div style="font-size:10px; color:#94a3b8;">L{i} {badge}</div>
+                    <div style="font-size:12px; font-weight:bold; color:#f8fafc;">{tok_str}</div>
+                    <div style="font-size:10px; color:#38bdf8;">{prob_pct}%</div>
+                </div>
+            """, unsafe_allow_html=True)
 else:
     st.info("👈 Set your prompt and click '🚀 Generate Tokens' in the sidebar to run the engine!")
