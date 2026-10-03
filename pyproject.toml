@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glassbox-ai"
+version = "0.1.0"
+description = "A from-scratch LLM inference engine with live mechanistic interpretability visualizer."
+readme = "README.md"
+authors = [{ name = "Vivi", email = "bistighosh16@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24.0",
+    "huggingface_hub>=0.20.0",
+    "tokenizers>=0.15.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+]
+
+[project.scripts]
+glassbox = "glassbox.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+"glassbox" = ["web/*", "web/**/*"]
