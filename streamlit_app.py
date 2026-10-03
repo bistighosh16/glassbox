@@ -1,226 +1,204 @@
-import os
 import sys
 import time
-import subprocess
 from pathlib import Path
 
-# Fix Python path so Streamlit Cloud finds the 'glassbox' package
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# 0. Self-healing dependency installer (ensures safetensors, plotly, etc. are installed)
-for pkg_name, module_name in [("safetensors", "safetensors"), ("plotly", "plotly"), ("tokenizers", "tokenizers"), ("huggingface-hub", "huggingface_hub")]:
-    try:
-        __import__(module_name)
-    except ImportError:
-        print(f"Installing missing package {pkg_name}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name])
-
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# Set dark theme page configuration
+from glassbox.generate import generate_stream
+from glassbox.model import Transformer
+from glassbox.ops import softmax
+from glassbox.tokenizer import Tokenizer
+from glassbox.trace import logit_lens
+
+
 st.set_page_config(
-    page_title="GlassBox AI 🔮 — See Inside the Model",
+    page_title="GlassBox AI — See Inside the Model",
     page_icon="🔮",
     layout="wide",
-    initial_sidebar_state="expanded"
+)
+st.markdown(
+    """
+    <style>
+        .main { background-color: #090a0f; color: #f8fafc; }
+        .stApp { background-color: #090a0f; }
+        div[data-testid="stMetricValue"] {
+            font-family: 'JetBrains Mono', monospace;
+            color: #38bdf8;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-# Custom CSS for dark instrument panel aesthetic
-st.markdown("""
-<style>
-    .main { background-color: #090a0f; color: #f8fafc; }
-    .stApp { background-color: #090a0f; }
-    div[data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; color: #38bdf8; }
-</style>
-""", unsafe_allow_html=True)
+MODEL_DIR = ROOT / "models" / "SmolLM2-135M"
 
-# 1. Download Model Weights if not present
-model_dir = Path("models/SmolLM2-135M")
-if not (model_dir / "model.safetensors").exists():
-    with st.spinner("Downloading SmolLM2-135M model weights (~270MB)..."):
-        import download_model
 
-from glassbox.loader import load_model
-from glassbox.tokenizer import SmolLMTokenizer
-from glassbox.trace import TraceCollector
-from glassbox.ops import softmax
-
-# 2. Load Model & Tokenizer with caching
 @st.cache_resource
-def get_model_and_tokenizer():
-    model, config = load_model("models/SmolLM2-135M")
-    tokenizer = SmolLMTokenizer("models/SmolLM2-135M")
-    return model, config, tokenizer
+def get_model_and_tokenizer(model_dir: str):
+    return Transformer(model_dir), Tokenizer(model_dir)
 
-model, config, tokenizer = get_model_and_tokenizer()
+
+if not (MODEL_DIR / "config.json").is_file() or not (
+    (MODEL_DIR / "model.safetensors").is_file()
+    or (MODEL_DIR / "model.safetensors.index.json").is_file()
+):
+    with st.spinner("Downloading SmolLM2-135M model weights (~270 MB)..."):
+        from download_model import main as download_model_weights
+
+        download_model_weights()
+
+model, tokenizer = get_model_and_tokenizer(str(MODEL_DIR))
+config = model.config
 
 st.title("GlassBox 🔮 — See Inside the Model")
 st.caption("Pure NumPy Transformer Engine · Mechanistic Interpretability Dashboard")
 
-# Sidebar Controls
 st.sidebar.header("Controls & Prompt")
-prompt = st.sidebar.text_area("Prompt", value="The capital of France is", height=100)
-max_tokens = st.sidebar.number_input("Max Tokens", min_value=1, max_value=50, value=20)
-
+prompt = st.sidebar.text_area(
+    "Prompt", value="The capital of France is", height=100
+)
+max_tokens = st.sidebar.number_input(
+    "Maximum new tokens", min_value=1, max_value=50, value=20
+)
 st.sidebar.subheader("Sampling Strategy")
-temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.05)
+temperature = st.sidebar.slider(
+    "Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.05
+)
+top_k = st.sidebar.number_input(
+    "Top-k", min_value=1, max_value=200, value=40
+)
+top_p = st.sidebar.slider(
+    "Top-p", min_value=0.05, max_value=1.0, value=0.9, step=0.05
+)
 
-# Session state for trace data
-if "trace" not in st.session_state:
-    st.session_state.trace = None
-if "generated_tokens" not in st.session_state:
-    st.session_state.generated_tokens = []
-if "speed" not in st.session_state:
-    st.session_state.speed = 0.0
+if "steps" not in st.session_state:
+    st.session_state.steps = []
+    st.session_state.generated_text = ""
 
 if st.sidebar.button("🚀 Generate Tokens", type="primary", use_container_width=True):
-    collector = TraceCollector()
-    input_ids = tokenizer.encode(prompt)
-    
-    t0 = time.time()
-    curr_ids = list(input_ids)
-    
-    with st.spinner("Running GlassBox NumPy Engine..."):
-        for step in range(max_tokens):
-            step_trace = collector.start_step(step, curr_ids)
-            logits = model.forward(curr_ids, trace_collector=collector, cache=None)
-            
-            next_logits = logits[0, -1, :]
-            step_trace.logits = next_logits
-            
-            if temperature == 0:
-                next_id = int(np.argmax(next_logits))
-            else:
-                scaled = next_logits / max(0.01, temperature)
-                probs = softmax(scaled)
-                next_id = int(np.random.choice(len(probs), p=probs))
-                
-            curr_ids.append(next_id)
-            step_trace.output_token = next_id
-            if next_id == tokenizer.eos_token_id:
-                break
-                
-    elapsed = time.time() - t0
-    st.session_state.generated_tokens = [tokenizer.decode([tid]) for tid in curr_ids]
-    st.session_state.trace = collector
-    st.session_state.speed = round(len(curr_ids) / max(0.001, elapsed), 1)
-
-# Display Dashboard if Trace exists
-if st.session_state.trace and len(st.session_state.trace.steps) > 0:
-    steps = st.session_state.trace.steps
-    
-    # Metrics
-    c1, c2 = st.columns(2)
-    c1.metric("Tok/s", f"{st.session_state.speed}")
-    c2.metric("Total Tokens", f"{len(st.session_state.generated_tokens)}")
-    
-    # Step Selector Slider
-    step_idx = st.slider("Step Inspector Slider", min_value=0, max_value=len(steps)-1, value=0)
-    current_step = steps[step_idx]
-    
-    st.markdown("---")
-    
-    # Heatmap & Probabilities Split
-    col_left, col_right = st.columns([6, 4])
-    
-    with col_left:
-        st.subheader("Attention Matrix")
-        layer_idx = st.selectbox("Layer", options=list(range(config.num_hidden_layers)), index=min(15, config.num_hidden_layers-1))
-        head_idx = st.selectbox("Head", options=list(range(config.num_attention_heads)), index=0)
-        
-        attn_matrix = current_step.attention[layer_idx][head_idx]
-        tokens_so_far = [tokenizer.decode([tid]).replace(" ", "·") for tid in current_step.tokens]
-        
-        fig_attn = px.imshow(
-            np.sqrt(np.clip(attn_matrix, 0, 1)),
-            x=tokens_so_far,
-            y=tokens_so_far[1:] if len(tokens_so_far) > 1 else tokens_so_far,
-            color_continuous_scale="Viridis",
-            labels=dict(x="Key Tokens (Past)", y="Query Tokens (Generated)", color="Attention")
+    started = time.perf_counter()
+    with st.spinner("Generating tokens and collecting model traces..."):
+        generated_steps = list(
+            generate_stream(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_new_tokens=int(max_tokens),
+                temperature=float(temperature),
+                top_k=int(top_k),
+                top_p=float(top_p),
+                use_cache=True,
+                trace=True,
+            )
         )
-        fig_attn.update_layout(
+    prompt_ids = tokenizer.encode(prompt)
+    generated_ids = [step.token_id for step in generated_steps]
+    st.session_state.steps = generated_steps
+    st.session_state.generated_text = tokenizer.decode(prompt_ids + generated_ids)
+    st.session_state.generation_seconds = time.perf_counter() - started
+
+steps = st.session_state.steps
+if steps:
+    metric_left, metric_right = st.columns(2)
+    metric_left.metric("Generated tokens", len(steps))
+    elapsed = max(st.session_state.generation_seconds, 0.001)
+    metric_right.metric("Average speed", f"{len(steps) / elapsed:.1f} tokens/s")
+    st.subheader("Generated text")
+    st.write(st.session_state.generated_text)
+
+    step_idx = st.slider(
+        "Inspect generation step",
+        min_value=0,
+        max_value=len(steps) - 1,
+        value=0,
+    )
+    current_step = steps[step_idx]
+    context_ids = tokenizer.encode(prompt) + [
+        step.token_id for step in steps[:step_idx]
+    ]
+    context_tokens = [
+        tokenizer.decode(token_id).replace(" ", "·") for token_id in context_ids
+    ]
+
+    st.markdown("---")
+    col_left, col_right = st.columns([6, 4])
+
+    with col_left:
+        st.subheader("Attention")
+        layer_idx = st.selectbox(
+            "Layer",
+            options=list(range(config.num_hidden_layers)),
+            index=min(15, config.num_hidden_layers - 1),
+        )
+        head_idx = st.selectbox(
+            "Attention head",
+            options=list(range(config.num_attention_heads)),
+            index=0,
+        )
+        layer_trace = current_step.traces[layer_idx]
+        attention_row = layer_trace.attn_weights[0, head_idx, -1, :]
+        attention_tokens = context_tokens[-len(attention_row) :]
+        attention_fig = go.Figure(
+            go.Heatmap(
+                z=[attention_row.tolist()],
+                x=attention_tokens,
+                y=["Next token"],
+                colorscale="Viridis",
+                colorbar={"title": "Attention"},
+            )
+        )
+        attention_fig.update_layout(
             margin=dict(l=10, r=10, t=10, b=10),
             paper_bgcolor="#090a0f",
             plot_bgcolor="#090a0f",
-            font=dict(color="#cbd5e1")
+            font=dict(color="#cbd5e1"),
+            xaxis_title="Tokens attended to",
         )
-        st.plotly_chart(fig_attn, use_container_width=True)
+        st.plotly_chart(attention_fig, use_container_width=True)
 
     with col_right:
-        st.subheader("Next-Token Probabilities")
-        step_logits = current_step.logits
-        probs = softmax(step_logits / max(0.01, temperature))
-        top_indices = np.argsort(probs)[-10:][::-1]
-        
-        top_toks = [tokenizer.decode([i]).replace(" ", "·") for i in top_indices]
-        top_probs = [probs[i] * 100 for i in top_indices]
-        
-        fig_probs = go.Figure(go.Bar(
-            x=top_probs,
-            y=top_toks,
-            orientation='h',
-            marker=dict(color='#38bdf8')
-        ))
-        fig_probs.update_layout(
+        st.subheader("Next-token probabilities")
+        logits = current_step.output_logits
+        probabilities = softmax(logits / max(float(temperature), 0.01))
+        top_indices = np.argsort(probabilities)[-10:][::-1]
+        top_tokens = [
+            tokenizer.decode(int(index)).replace(" ", "·")
+            for index in top_indices
+        ]
+        probability_fig = go.Figure(
+            go.Bar(
+                x=[float(probabilities[index] * 100) for index in top_indices],
+                y=top_tokens,
+                orientation="h",
+                marker=dict(color="#38bdf8"),
+            )
+        )
+        probability_fig.update_layout(
             yaxis=dict(autorange="reversed"),
+            xaxis_title="Probability (%)",
             margin=dict(l=10, r=10, t=10, b=10),
             paper_bgcolor="#090a0f",
             plot_bgcolor="#090a0f",
-            font=dict(color="#cbd5e1")
+            font=dict(color="#cbd5e1"),
         )
-        st.plotly_chart(fig_probs, use_container_width=True)
+        st.plotly_chart(probability_fig, use_container_width=True)
 
-    # Bottom: Logit Lens
     st.markdown("---")
     st.subheader("Logit Lens — Predictions Layer by Layer")
-    st.caption("🎯 Gold Highlight = First layer where prediction matches final layer output")
-    
-    lens_data = current_step.logit_lens
-    final_token = lens_data[-1]["top_token"]
-    first_match = next((i for i, l in enumerate(lens_data) if l["top_token"] == final_token), -1)
-    
-    cols_row1 = st.columns(15)
-    for i in range(min(15, len(lens_data))):
-        layer_info = lens_data[i]
-        tok_str = (layer_info.get("top_token_str") or tokenizer.decode([layer_info["top_token"]])).replace(" ", "·")
-        prob_pct = round(layer_info["prob"] * 100, 1)
-        
-        is_gold = (i == first_match)
-        border_style = "2px solid #facc15" if is_gold else "1px solid #283046"
-        bg_style = "#232215" if is_gold else "#181d2d"
-        badge = "🎯" if is_gold else ""
-        
-        cols_row1[i].markdown(f"""
-            <div style="background:{bg_style}; border:{border_style}; border-radius:4px; padding:4px; text-align:center;">
-                <div style="font-size:10px; color:#94a3b8;">L{i} {badge}</div>
-                <div style="font-size:12px; font-weight:bold; color:#f8fafc;">{tok_str}</div>
-                <div style="font-size:10px; color:#38bdf8;">{prob_pct}%</div>
-            </div>
-        """, unsafe_allow_html=True)
-
-    if len(lens_data) > 15:
-        cols_row2 = st.columns(15)
-        for i in range(15, min(30, len(lens_data))):
-            layer_info = lens_data[i]
-            tok_str = (layer_info.get("top_token_str") or tokenizer.decode([layer_info["top_token"]])).replace(" ", "·")
-            prob_pct = round(layer_info["prob"] * 100, 1)
-            
-            is_gold = (i == first_match)
-            border_style = "2px solid #facc15" if is_gold else "1px solid #283046"
-            bg_style = "#232215" if is_gold else "#181d2d"
-            badge = "🎯" if is_gold else ""
-            
-            cols_row2[i-15].markdown(f"""
-                <div style="background:{bg_style}; border:{border_style}; border-radius:4px; padding:4px; text-align:center;">
-                    <div style="font-size:10px; color:#94a3b8;">L{i} {badge}</div>
-                    <div style="font-size:12px; font-weight:bold; color:#f8fafc;">{tok_str}</div>
-                    <div style="font-size:10px; color:#38bdf8;">{prob_pct}%</div>
-                </div>
-            """, unsafe_allow_html=True)
+    lens_results = logit_lens(model, tokenizer, current_step.traces)
+    lens_columns = st.columns(5)
+    for index, result in enumerate(lens_results):
+        with lens_columns[index % len(lens_columns)]:
+            st.metric(
+                f"Layer {result.layer_idx}",
+                result.top_token_str,
+                f"{result.top_prob:.1%}",
+            )
 else:
-    st.info("👈 Set your prompt and click '🚀 Generate Tokens' in the sidebar to run the engine!")
+    st.info("Enter a prompt and select **Generate Tokens** to inspect a run.")

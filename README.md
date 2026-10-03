@@ -37,6 +37,16 @@ On macOS or Linux, activate the environment with `source venv/bin/activate`. The
 
 The model weights are not stored in this repository. `download_model.py` fetches them from Hugging Face.
 
+## ☁️ Deploy the Streamlit Dashboard
+
+To publish the Streamlit dashboard with Streamlit Community Cloud:
+
+1. Push this repository to GitHub.
+2. In Streamlit Community Cloud, create an app from the repository and select `streamlit_app.py` as the **Main file path**.
+3. Deploy. Streamlit installs the packages from the root `requirements.txt`; the app downloads SmolLM2-135M on startup because model weights are excluded from Git.
+
+The model download and loading can take a few minutes on the first start. Although the weights occupy about 270 MB on disk, inference converts them to float32 and generation also needs working memory. Use a host with sufficient RAM; a small instance may restart or run out of memory while loading or generating. The dashboard runs on CPU, so generation may be slow.
+
 ## 🏗️ Model and Architecture
 
 SmolLM2-135M has **30 layers**, a **576-wide hidden state**, **9 attention heads** with **3 key/value heads** (grouped-query attention), a **49,152-token vocabulary**, and about **134.5 million parameters**.
