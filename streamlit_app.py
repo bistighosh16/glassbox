@@ -1,16 +1,26 @@
 import os
 import sys
 import time
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import streamlit as st
+import subprocess
 from pathlib import Path
 
 # Fix Python path so Streamlit Cloud finds the 'glassbox' package
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# 0. Self-healing dependency installer (ensures safetensors, plotly, etc. are installed)
+for pkg_name, module_name in [("safetensors", "safetensors"), ("plotly", "plotly"), ("tokenizers", "tokenizers"), ("huggingface-hub", "huggingface_hub")]:
+    try:
+        __import__(module_name)
+    except ImportError:
+        print(f"Installing missing package {pkg_name}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name])
+
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
 # Set dark theme page configuration
 st.set_page_config(
@@ -26,8 +36,6 @@ st.markdown("""
     .main { background-color: #090a0f; color: #f8fafc; }
     .stApp { background-color: #090a0f; }
     div[data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; color: #38bdf8; }
-    .lens-card { background: #181d2d; border: 1px solid #283046; border-radius: 6px; padding: 8px; text-align: center; }
-    .first-match { border: 2px solid #facc15 !important; background: #232215 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -58,12 +66,9 @@ st.caption("Pure NumPy Transformer Engine · Mechanistic Interpretability Dashbo
 st.sidebar.header("Controls & Prompt")
 prompt = st.sidebar.text_area("Prompt", value="The capital of France is", height=100)
 max_tokens = st.sidebar.number_input("Max Tokens", min_value=1, max_value=50, value=20)
-use_cache = st.sidebar.checkbox("KV Cache Enabled", value=True)
 
 st.sidebar.subheader("Sampling Strategy")
 temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.05)
-top_k = st.sidebar.slider("Top-K", min_value=1, max_value=100, value=40)
-top_p = st.sidebar.slider("Top-P", min_value=0.1, max_value=1.0, value=0.9, step=0.05)
 
 # Session state for trace data
 if "trace" not in st.session_state:
@@ -78,7 +83,6 @@ if st.sidebar.button("🚀 Generate Tokens", type="primary", use_container_width
     input_ids = tokenizer.encode(prompt)
     
     t0 = time.time()
-    # Simple generation loop
     curr_ids = list(input_ids)
     
     with st.spinner("Running GlassBox NumPy Engine..."):
@@ -86,15 +90,13 @@ if st.sidebar.button("🚀 Generate Tokens", type="primary", use_container_width
             step_trace = collector.start_step(step, curr_ids)
             logits = model.forward(curr_ids, trace_collector=collector, cache=None)
             
-            # Extract last token logits
             next_logits = logits[0, -1, :]
             step_trace.logits = next_logits
             
-            # Simple greedy or sampled next token
             if temperature == 0:
                 next_id = int(np.argmax(next_logits))
             else:
-                scaled = next_logits / temperature
+                scaled = next_logits / max(0.01, temperature)
                 probs = softmax(scaled)
                 next_id = int(np.random.choice(len(probs), p=probs))
                 
@@ -113,10 +115,9 @@ if st.session_state.trace and len(st.session_state.trace.steps) > 0:
     steps = st.session_state.trace.steps
     
     # Metrics
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     c1.metric("Tok/s", f"{st.session_state.speed}")
     c2.metric("Total Tokens", f"{len(st.session_state.generated_tokens)}")
-    c3.metric("KV Cache", "ON" if use_cache else "OFF")
     
     # Step Selector Slider
     step_idx = st.slider("Step Inspector Slider", min_value=0, max_value=len(steps)-1, value=0)
@@ -135,7 +136,6 @@ if st.session_state.trace and len(st.session_state.trace.steps) > 0:
         attn_matrix = current_step.attention[layer_idx][head_idx]
         tokens_so_far = [tokenizer.decode([tid]).replace(" ", "·") for tid in current_step.tokens]
         
-        # Plotly Viridis Heatmap
         fig_attn = px.imshow(
             np.sqrt(np.clip(attn_matrix, 0, 1)),
             x=tokens_so_far,
@@ -182,11 +182,8 @@ if st.session_state.trace and len(st.session_state.trace.steps) > 0:
     
     lens_data = current_step.logit_lens
     final_token = lens_data[-1]["top_token"]
-    
-    # Find first match layer
     first_match = next((i for i, l in enumerate(lens_data) if l["top_token"] == final_token), -1)
     
-    # Display 30 layers in 2 rows of 15 columns
     cols_row1 = st.columns(15)
     for i in range(min(15, len(lens_data))):
         layer_info = lens_data[i]
